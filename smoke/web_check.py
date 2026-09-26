@@ -45,6 +45,35 @@ def main():
     if resp.status != 200 or not data.get("feasible"):
         fail(f"经 nginx 的业务配平失败：{data}")
     print(f"  ✓ POST /api/balance 经 nginx 透传成功，序列 {data['tie_sequence']}")
+
+    schedule_payload = {
+        "source": {"id": "S"}, "slots": 2, "source_dispatch": [6, 0],
+        "zones": [{"id": "A", "demands": [0, 3]},
+                  {"id": "B", "demands": [0, 3]}],
+        "nodes": [{"id": "N", "capacity": 6}],
+        "pipes": [
+            {"id": "p1", "from": "S", "to": "N", "min": 0, "max": 10,
+             "preferred": 6, "travel": 0},
+            {"id": "p2", "from": "N", "to": "A", "min": 0, "max": 10,
+             "preferred": 0, "travel": 0},
+            {"id": "p3", "from": "N", "to": "B", "min": 0, "max": 10,
+             "preferred": 0, "travel": 0},
+            {"id": "p4", "from": "S", "to": "A", "min": 0, "max": 0,
+             "preferred": 0, "travel": 0},
+        ],
+    }
+    req = urllib.request.Request(
+        BASE + "/api/schedule",
+        data=json.dumps(schedule_payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    if resp.status != 200 or not data.get("feasible"):
+        fail(f"经 nginx 的时序复核失败：{data}")
+    if data["nodes"][0]["inventory"] != [6, 0]:
+        fail(f"经 nginx 的时序复核库存台账异常：{data['nodes']}")
+    print("  ✓ POST /api/schedule 经 nginx 透传成功，"
+          f"库存台账 {data['nodes'][0]['inventory']}")
     print("[web-smoke] Web/API 联调全部通过")
 
 

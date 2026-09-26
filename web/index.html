@@ -86,7 +86,7 @@
 <body>
 <header>
   <h1>纸本修复室 · 雾化管路配平</h1>
-  <p>回湿脆化古画前，审核雾化管路能否把规定水量稳定送到每个分区：水源总量精确流出、分流节点收支相等、分区精确满足需求、各管流量落在最小/最大量内；先最小化相对优选量的绝对偏差和，再按管路录入顺序稳定决胜。</p>
+  <p>回湿脆化古画前，审核雾化管路能否把规定水量稳定送到每个分区：水源总量精确流出、分流节点收支相等、分区精确满足需求、各管流量落在最小/最大量内；先最小化相对优选量的绝对偏差和，再按管路录入顺序稳定决胜。时序复核进一步展开 2~4 个连续雾化时隙：水量在行程时隙结束后才到达下游，节点可暂存但不得越上限，期末不留库存与在途。</p>
 </header>
 <main>
   <section class="card">
@@ -141,6 +141,52 @@
     </div>
   </section>
 
+  <section class="card">
+    <div class="actions" style="justify-content: space-between">
+      <h2 style="margin:0">时序复核（连续雾化时隙）</h2>
+      <button class="btn" id="btn-sched-run" type="button">发起时序复核</button>
+    </div>
+    <div id="sched-error"></div>
+    <p class="hint" style="margin-top:8px">
+      在上方管路草稿旁建立 2~4 个连续雾化时隙：水量在管路行程时隙结束后才到达下游；
+      每时隙水源放出恰等于申报量、分区到水恰等于需求；期末不得遗留库存或在途水量。
+    </p>
+    <div class="row" style="margin-top:6px">
+      <label>时隙数
+        <select id="slots-select" onchange="setSlots(Number(this.value))">
+          <option value="2">2</option>
+          <option value="3">3</option>
+          <option value="4">4</option>
+        </select>
+      </label>
+    </div>
+
+    <h2 style="margin-top:14px">水源逐时隙放出</h2>
+    <div class="row" id="supply-row"></div>
+
+    <h2 style="margin-top:14px">分区逐时隙精确到水量</h2>
+    <table>
+      <thead id="zone-demand-head"></thead>
+      <tbody id="zone-demand-body"></tbody>
+    </table>
+
+    <h2 style="margin-top:14px">分流节点暂存上限</h2>
+    <table>
+      <thead><tr><th>节点编号</th><th class="num">暂存上限</th></tr></thead>
+      <tbody id="node-cap-body"></tbody>
+    </table>
+
+    <h2 style="margin-top:14px">管路行程时隙（整数）</h2>
+    <table>
+      <thead><tr>
+        <th style="width:34px">#</th><th>管路编号</th><th>方向</th><th class="num">行程时隙</th>
+      </tr></thead>
+      <tbody id="pipe-travel-body"></tbody>
+    </table>
+  </section>
+
+  <section id="sched-result"></section>
+
   <section id="result"></section>
 </main>
 
@@ -149,14 +195,19 @@
 
 const state = {
   source: { id: "S", total: 10 },
-  zones: [{ id: "A", demand: 6 }, { id: "B", demand: 4 }],
-  nodes: [{ id: "N" }],
-  pipes: [
-    { id: "p1", from: "S", to: "N", min: 0, preferred: 5, max: 10 },
-    { id: "p2", from: "N", to: "A", min: 0, preferred: 3, max: 10 },
-    { id: "p3", from: "N", to: "B", min: 0, preferred: 7, max: 10 },
-    { id: "p4", from: "S", to: "A", min: 0, preferred: 0, max: 0 },
+  zones: [
+    { id: "A", demand: 6, demands: [3, 3] },
+    { id: "B", demand: 4, demands: [2, 2] },
   ],
+  nodes: [{ id: "N", capacity: 10 }],
+  pipes: [
+    { id: "p1", from: "S", to: "N", min: 0, preferred: 5, max: 10, travel: 0 },
+    { id: "p2", from: "N", to: "A", min: 0, preferred: 3, max: 10, travel: 0 },
+    { id: "p3", from: "N", to: "B", min: 0, preferred: 7, max: 10, travel: 0 },
+    { id: "p4", from: "S", to: "A", min: 0, preferred: 0, max: 0, travel: 0 },
+  ],
+  slots: 2,
+  supply: [10, 0],
 };
 
 const $ = (id) => document.getElementById(id);
@@ -221,6 +272,74 @@ function render() {
   $("btn-add-zone").disabled = state.zones.length >= 4;
   $("btn-add-node").disabled = state.nodes.length >= 4;
   $("btn-add-pipe").disabled = state.pipes.length >= 10;
+
+  renderSchedule();
+}
+
+// ---- 时序复核草稿 ----
+
+function resizePlan(arr, n, fill) {
+  const out = arr.slice(0, n);
+  while (out.length < n) out.push(fill);
+  return out;
+}
+
+window.setSlots = (n) => {
+  syncSource();
+  state.slots = n;
+  state.supply = resizePlan(state.supply, n, 0);
+  state.zones.forEach((z) => { z.demands = resizePlan(z.demands, n, 0); });
+  render();
+};
+
+window.updateSupply = (t, val) => {
+  state.supply[t] = Number(val);
+};
+window.updateZoneDemand = (i, t, val) => {
+  state.zones[i].demands[t] = Number(val);
+};
+window.updateNodeCap = (i, val) => {
+  state.nodes[i].capacity = Number(val);
+};
+window.updatePipeTravel = (i, val) => {
+  state.pipes[i].travel = Number(val);
+};
+
+function renderSchedule() {
+  $("slots-select").value = String(state.slots);
+  const slots = state.slots;
+
+  $("supply-row").innerHTML = Array.from({ length: slots }, (_, t) => `
+    <label>时隙 ${t} 放出
+      <input type="number" min="0" step="1" value="${state.supply[t]}"
+             onchange="updateSupply(${t},this.value)">
+    </label>`).join("");
+
+  $("zone-demand-head").innerHTML = `<tr><th>分区编号</th>${
+    Array.from({ length: slots }, (_, t) =>
+      `<th class="num">时隙 ${t} 需求</th>`).join("")}</tr>`;
+  $("zone-demand-body").innerHTML = state.zones.map((z, i) => `
+    <tr><td>${esc(z.id)}</td>${
+      z.demands.slice(0, slots).map((d, t) => `
+        <td class="num"><input type="number" min="0" step="1" value="${d}"
+          onchange="updateZoneDemand(${i},${t},this.value)"></td>`).join("")
+    }</tr>`).join("");
+
+  $("node-cap-body").innerHTML = state.nodes.length
+    ? state.nodes.map((n, i) => `
+      <tr><td>${esc(n.id)}</td>
+        <td class="num"><input type="number" min="0" step="1" value="${n.capacity}"
+          onchange="updateNodeCap(${i},this.value)"></td></tr>`).join("")
+    : `<tr><td colspan="2" class="muted">无分流节点</td></tr>`;
+
+  $("pipe-travel-body").innerHTML = state.pipes.map((p, i) => `
+    <tr>
+      <td><span class="order-tag">${i + 1}</span></td>
+      <td>${esc(p.id)}</td>
+      <td>${esc(p.from)} <span class="arrow">→</span> ${esc(p.to)}</td>
+      <td class="num"><input type="number" min="0" max="${slots}" step="1"
+        value="${p.travel}" onchange="updatePipeTravel(${i},this.value)"></td>
+    </tr>`).join("");
 }
 
 function syncSource() {
@@ -268,14 +387,15 @@ window.movePipe = (i, dir) => {
 $("btn-add-zone").addEventListener("click", () => {
   syncSource();
   if (state.zones.length < 4) {
-    state.zones.push({ id: `Z${state.zones.length + 1}`, demand: 0 });
+    state.zones.push({ id: `Z${state.zones.length + 1}`, demand: 0,
+                       demands: Array(state.slots).fill(0) });
     render();
   }
 });
 $("btn-add-node").addEventListener("click", () => {
   syncSource();
   if (state.nodes.length < 4) {
-    state.nodes.push({ id: `N${state.nodes.length + 1}` });
+    state.nodes.push({ id: `N${state.nodes.length + 1}`, capacity: 0 });
     render();
   }
 });
@@ -286,23 +406,30 @@ $("btn-add-pipe").addEventListener("click", () => {
     state.pipes.push({
       id: `p${n}`, from: state.source.id,
       to: state.zones[0] ? state.zones[0].id : "",
-      min: 0, preferred: 0, max: 5,
+      min: 0, preferred: 0, max: 5, travel: 0,
     });
     render();
   }
 });
 $("btn-sample").addEventListener("click", () => {
   document.getElementById("result").innerHTML = "";
+  document.getElementById("sched-result").innerHTML = "";
   document.getElementById("form-error").innerHTML = "";
+  document.getElementById("sched-error").innerHTML = "";
   state.source = { id: "S", total: 10 };
-  state.zones = [{ id: "A", demand: 6 }, { id: "B", demand: 4 }];
-  state.nodes = [{ id: "N" }];
-  state.pipes = [
-    { id: "p1", from: "S", to: "N", min: 0, preferred: 5, max: 10 },
-    { id: "p2", from: "N", to: "A", min: 0, preferred: 3, max: 10 },
-    { id: "p3", from: "N", to: "B", min: 0, preferred: 7, max: 10 },
-    { id: "p4", from: "S", to: "A", min: 0, preferred: 0, max: 0 },
+  state.zones = [
+    { id: "A", demand: 6, demands: [3, 3] },
+    { id: "B", demand: 4, demands: [2, 2] },
   ];
+  state.nodes = [{ id: "N", capacity: 10 }];
+  state.pipes = [
+    { id: "p1", from: "S", to: "N", min: 0, preferred: 5, max: 10, travel: 0 },
+    { id: "p2", from: "N", to: "A", min: 0, preferred: 3, max: 10, travel: 0 },
+    { id: "p3", from: "N", to: "B", min: 0, preferred: 7, max: 10, travel: 0 },
+    { id: "p4", from: "S", to: "A", min: 0, preferred: 0, max: 0, travel: 0 },
+  ];
+  state.slots = 2;
+  state.supply = [10, 0];
   render();
 });
 
@@ -453,6 +580,192 @@ $("btn-run").addEventListener("click", async () => {
   } finally {
     btn.disabled = false;
     btn.textContent = "发起配平";
+  }
+});
+
+// ---- 时序复核：提交与逐时隙台账展示 ----
+
+function buildSchedulePayload() {
+  syncSource();
+  const slots = state.slots;
+  return {
+    source: { id: state.source.id },
+    slots,
+    source_dispatch: state.supply.slice(0, slots),
+    zones: state.zones.map((z) => ({
+      id: z.id, demands: z.demands.slice(0, slots),
+    })),
+    nodes: state.nodes.map((n) => ({ id: n.id, capacity: n.capacity })),
+    pipes: state.pipes.map((p) => ({
+      id: p.id, from: p.from, to: p.to,
+      min: p.min, max: p.max, preferred: p.preferred, travel: p.travel,
+    })),
+  };
+}
+
+function slotMatrix(rows, slots, key, blockedRows) {
+  return rows.map((row) => `
+    <tr>
+      <td><span class="order-tag">${row.order + 1}</span></td>
+      <td>${esc(row.pipe_id)}</td>
+      <td>${esc(row.from)} <span class="arrow">→</span> ${esc(row.to)}</td>
+      ${Array.from({ length: slots }, (_, t) => {
+        if (blockedRows && row.blocked_slots.includes(t)) {
+          return `<td class="num muted">—</td>`;
+        }
+        return `<td class="num flow-cell">${row[key][t]}</td>`;
+      }).join("")}
+    </tr>`).join("");
+}
+
+function renderSchedFeasible(r) {
+  const slots = r.slots;
+  const slotHead = Array.from({ length: slots }, (_, t) =>
+    `<th class="num">时隙 ${t}</th>`).join("");
+  const seq = r.tie_sequence.map((x) => esc(x)).join(", ");
+
+  const dispatchRows = slotMatrix(r.pipes, slots, "dispatch", true);
+  const arrivalRows = slotMatrix(r.pipes, slots, "arrival", false);
+
+  const src = r.source;
+  const srcRow = `
+    <tr><td>${esc(src.id)} <span class="muted">水源</span></td>
+      ${Array.from({ length: slots }, (_, t) => {
+        const ok = src.difference[t] === 0;
+        return `<td class="num ${ok ? "zero" : "nonzero"}">${src.dispatch[t]} / ${src.declared[t]}</td>`;
+      }).join("")}
+    </tr>`;
+
+  const nodeRows = r.nodes.length
+    ? r.nodes.map((n) => `
+      <tr><td>${esc(n.id)} <span class="muted">分流节点</span></td>
+        ${n.inventory.map((v) => `
+          <td class="num ${v <= n.capacity ? "zero" : "nonzero"}">${v} / ${n.capacity}</td>`).join("")}
+      </tr>`).join("")
+    : `<tr><td colspan="${slots + 1}" class="muted">无分流节点</td></tr>`;
+
+  const zoneRows = r.zones.map((z) => `
+    <tr><td>${esc(z.id)} <span class="muted">分区</span></td>
+      ${z.arrivals.map((v, t) => {
+        const ok = z.difference[t] === 0;
+        return `<td class="num ${ok ? "zero" : "nonzero"}">${v} / ${z.demands[t]}</td>`;
+      }).join("")}
+    </tr>`).join("");
+
+  $("sched-result").innerHTML = `
+    <section class="card">
+      <div class="row" style="justify-content:space-between">
+        <h2 style="margin:0">时序复核结果　<span class="badge ok">可行方案</span></h2>
+        <div class="hint">逐时隙相对优选量绝对偏差和 = <b>${r.objective}</b></div>
+      </div>
+      <p class="hint" style="margin-top:8px">
+        决胜发出序列（时隙优先、时隙内按管路录入顺序）：<span class="seq">[${seq}]</span>
+      </p>
+
+      <h2 style="margin-top:14px">逐时隙发出台账（行程超期末的时隙禁止发出，记 —）</h2>
+      <table>
+        <thead><tr><th style="width:34px">#</th><th>管路</th><th>方向</th>${slotHead}</tr></thead>
+        <tbody>${dispatchRows}</tbody>
+      </table>
+
+      <h2 style="margin-top:14px">逐时隙到达台账（行程结束后才到达下游）</h2>
+      <table>
+        <thead><tr><th style="width:34px">#</th><th>管路</th><th>方向</th>${slotHead}</tr></thead>
+        <tbody>${arrivalRows}</tbody>
+      </table>
+
+      <h2 style="margin-top:14px">逐时隙库存台账（时隙末库存 / 暂存上限）</h2>
+      <table>
+        <thead><tr><th>节点</th>${slotHead}</tr></thead>
+        <tbody>${nodeRows}</tbody>
+      </table>
+
+      <h2 style="margin-top:14px">逐时隙收支对照（实际 / 申报·需求）</h2>
+      <table>
+        <thead><tr><th>顶点</th>${slotHead}</tr></thead>
+        <tbody>${srcRow}${zoneRows}</tbody>
+      </table>
+    </section>`;
+}
+
+function renderSchedInfeasible(r) {
+  const info = r.infeasibility;
+  const reasons = info.reasons.map((t) => `<li>${esc(t)}</li>`).join("");
+  const first = info.first_slot === null ? "—" : `时隙 ${info.first_slot}`;
+  const defRows = info.deficits.map((d) => `
+    <tr><td class="num">${d.slot}</td><td>${esc(d.vertex)}</td>
+      <td>${esc(d.kind)}</td><td class="num">${d.shortfall}</td></tr>`).join("");
+  const surRows = info.surpluses.map((s) => {
+    const inv = s.kind === "分流节点"
+      ? `<td class="num">${s.inventory_used} / ${s.capacity}</td>`
+      : `<td class="num muted">—</td>`;
+    return `<tr><td class="num">${s.slot}</td><td>${esc(s.vertex)}</td>
+      <td>${esc(s.kind)}</td><td class="num">${s.excess}</td>${inv}</tr>`;
+  }).join("");
+
+  $("sched-result").innerHTML = `
+    <section class="card">
+      <h2>时序复核结果　<span class="badge no">不可行</span></h2>
+      <div class="banner warn">
+        首个无法满足的时隙：<b>${first}</b>；
+        水源放出合计 <b>${info.total_supply}</b>，分区需求合计
+        <b>${info.total_demand}</b>。
+      </div>
+      <h2>结论与原因</h2>
+      <ul class="reasons">${reasons}</ul>
+      <div class="row" style="align-items:flex-start; margin-top:10px">
+        <div style="flex:1">
+          <h2>进水不足点（按时间定位）</h2>
+          <table><thead><tr>
+            <th class="num">时隙</th><th>编号</th><th>类型</th><th class="num">缺口</th>
+          </tr></thead>
+            <tbody>${defRows || '<tr><td colspan="4" class="muted">无</td></tr>'}</tbody></table>
+        </div>
+        <div style="flex:1">
+          <h2>来水积压点（按时间定位）</h2>
+          <table><thead><tr>
+            <th class="num">时隙</th><th>编号</th><th>类型</th>
+            <th class="num">积压</th><th class="num">库存/上限</th>
+          </tr></thead>
+            <tbody>${surRows || '<tr><td colspan="5" class="muted">无</td></tr>'}</tbody></table>
+        </div>
+      </div>
+      <p class="hint" style="margin-top:10px">
+        提示：先检查首个失败时隙——分区需求是否有足够早的放水与足够短的行程支撑；
+        节点积压时核对暂存上限；并确认放出合计与需求合计相等。
+      </p>
+    </section>`;
+}
+
+$("btn-sched-run").addEventListener("click", async () => {
+  const errBox = $("sched-error");
+  errBox.innerHTML = "";
+  $("sched-result").innerHTML = "";
+  const btn = $("btn-sched-run");
+  btn.disabled = true;
+  btn.textContent = "复核中…";
+  try {
+    const resp = await fetch("/api/schedule", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(buildSchedulePayload()),
+    });
+    const data = await resp.json();
+    if (resp.status === 400) {
+      errBox.innerHTML = `<div class="banner error">时序草稿未通过校验：${esc(data.error)}</div>`;
+      return;
+    }
+    if (!resp.ok) {
+      errBox.innerHTML = `<div class="banner error">服务异常（HTTP ${resp.status}），请稍后重试。</div>`;
+      return;
+    }
+    if (data.feasible) renderSchedFeasible(data);
+    else renderSchedInfeasible(data);
+  } catch (e) {
+    errBox.innerHTML = `<div class="banner error">无法连接时序复核服务：${esc(e.message)}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "发起时序复核";
   }
 });
 
