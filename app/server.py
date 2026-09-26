@@ -2,8 +2,9 @@
 
 路由
 ----
-- GET  /healthz        健康检查
-- POST /api/balance    提交草稿并发起配平
+- GET  /healthz         健康检查
+- POST /api/balance     提交草稿并发起静态配平
+- POST /api/schedule    提交时隙草稿并发起时序复核
 - 其他路径/方法          404 / 405
 """
 
@@ -13,7 +14,15 @@ import json
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from .balance import MAX_REQUEST_BYTES, ValidationError, solve
+from .balance import MAX_REQUEST_BYTES, ValidationError
+from .balance import solve as solve_balance
+from .schedule import solve_schedule
+
+# 路径 -> 求解器
+SOLVERS = {
+    "/api/balance": solve_balance,
+    "/api/schedule": solve_schedule,
+}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -29,16 +38,18 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self) -> None:
-        if self.path.split("?", 1)[0] == "/healthz":
+        path = self.path.split("?", 1)[0]
+        if path == "/healthz":
             self._send_json(200, {"status": "ok", "service": "balance-api"})
-        elif self.path.split("?", 1)[0] == "/api/balance":
+        elif path in SOLVERS:
             self._send_json(405, {"error": "请使用 POST 提交草稿"})
         else:
             self._send_json(404, {"error": "路径不存在"})
 
     def do_POST(self) -> None:
-        if self.path.split("?", 1)[0] != "/api/balance":
-            if self.path.split("?", 1)[0] == "/healthz":
+        path = self.path.split("?", 1)[0]
+        if path not in SOLVERS:
+            if path == "/healthz":
                 self._send_json(405, {"error": "健康检查请使用 GET"})
             else:
                 self._send_json(404, {"error": "路径不存在"})
@@ -60,7 +71,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
-            result = solve(payload)
+            result = SOLVERS[path](payload)
         except ValidationError as exc:
             self._send_json(400, {"error": str(exc)})
             return

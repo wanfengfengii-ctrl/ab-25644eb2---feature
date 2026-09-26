@@ -86,7 +86,7 @@
 <body>
 <header>
   <h1>纸本修复室 · 雾化管路配平</h1>
-  <p>回湿脆化古画前，审核雾化管路能否把规定水量稳定送到每个分区：水源总量精确流出、分流节点收支相等、分区精确满足需求、各管流量落在最小/最大量内；先最小化相对优选量的绝对偏差和，再按管路录入顺序稳定决胜。</p>
+  <p>回湿脆化古画前，审核雾化管路能否把规定水量稳定送到每个分区：水源总量精确流出、分流节点收支相等、分区精确满足需求、各管流量落在最小/最大量内；先最小化相对优选量的绝对偏差和，再按管路录入顺序稳定决胜。还可在同一草稿上叠加 2~4 个连续雾化时隙做时序复核：逐隙水源放出、分区逐隙需求、管路行程时隙与节点暂存上限一并求解，避免行程与暂存被静态配平掩盖。</p>
 </header>
 <main>
   <section class="card">
@@ -142,6 +142,52 @@
   </section>
 
   <section id="result"></section>
+
+  <section class="card">
+    <div class="actions" style="justify-content: space-between">
+      <h2 style="margin:0">时序复核（2 ~ 4 个连续雾化时隙）</h2>
+      <button class="btn" id="btn-sched" type="button">发起时序复核</button>
+    </div>
+    <p class="hint">
+      在上方管路草稿旁叠加时隙维度：填写各时隙水源放水量、分区逐隙精确需求、每条管路的整数行程时隙与每个分流节点的暂存上限。
+      时隙 t 发出的水量于时隙 t+行程 到达下游；任一管路各时隙发出量仍落在最小/最大量内，节点逐隙库存不超过暂存上限；
+      每时隙水源放出恰等于申报量、分区到水恰等于该隙需求，期末不留库存与在途水量。
+      可行时先最小化各（时隙×管路）发出量相对优选量的总绝对偏差，再按时隙与管路录入顺序稳定决胜。
+    </p>
+    <div id="sched-error"></div>
+    <div class="row" style="margin-top:10px">
+      <label>时隙数
+        <select id="horizon">
+          <option value="2">2</option>
+          <option value="3">3</option>
+          <option value="4">4</option>
+        </select>
+      </label>
+      <span class="hint">时隙编号 0 起；行程时隙 0 表示当期到达。期末之后才能到达的时隙发出量恒为 0，这些时隙若最小量大于 0 则与"期末无在途"冲突、整案不可行</span>
+    </div>
+
+    <h2 style="margin-top:14px">水源逐时隙放出量</h2>
+    <div class="row" id="release-row"></div>
+
+    <h2 style="margin-top:14px">分区逐时隙精确需求</h2>
+    <table id="zone-demand-table">
+      <thead id="zone-demand-head"></thead>
+      <tbody id="zone-demand-body"></tbody>
+    </table>
+
+    <h2 style="margin-top:14px">分流节点暂存上限</h2>
+    <div class="row" id="node-cap-row"></div>
+
+    <h2 style="margin-top:14px">管路行程时隙（整数）</h2>
+    <table>
+      <thead><tr>
+        <th style="width:34px">#</th><th>管路</th><th>方向</th><th class="num">行程时隙</th>
+      </tr></thead>
+      <tbody id="pipe-transit-body"></tbody>
+    </table>
+  </section>
+
+  <section id="sched-result"></section>
 </main>
 
 <script>
@@ -149,14 +195,19 @@
 
 const state = {
   source: { id: "S", total: 10 },
-  zones: [{ id: "A", demand: 6 }, { id: "B", demand: 4 }],
-  nodes: [{ id: "N" }],
-  pipes: [
-    { id: "p1", from: "S", to: "N", min: 0, preferred: 5, max: 10 },
-    { id: "p2", from: "N", to: "A", min: 0, preferred: 3, max: 10 },
-    { id: "p3", from: "N", to: "B", min: 0, preferred: 7, max: 10 },
-    { id: "p4", from: "S", to: "A", min: 0, preferred: 0, max: 0 },
+  zones: [
+    { id: "A", demand: 6, demands: [0, 2, 4] },
+    { id: "B", demand: 4, demands: [0, 2, 2] },
   ],
+  nodes: [{ id: "N", capacity: 2 }],
+  pipes: [
+    { id: "p1", from: "S", to: "N", min: 0, preferred: 5, max: 10, transit: 1 },
+    { id: "p2", from: "N", to: "A", min: 0, preferred: 3, max: 10, transit: 0 },
+    { id: "p3", from: "N", to: "B", min: 0, preferred: 7, max: 10, transit: 0 },
+    { id: "p4", from: "S", to: "A", min: 0, preferred: 0, max: 0, transit: 0 },
+  ],
+  horizon: 3,
+  release: [5, 5, 0],
 };
 
 const $ = (id) => document.getElementById(id);
@@ -221,6 +272,60 @@ function render() {
   $("btn-add-zone").disabled = state.zones.length >= 4;
   $("btn-add-node").disabled = state.nodes.length >= 4;
   $("btn-add-pipe").disabled = state.pipes.length >= 10;
+  renderScheduleForm();
+}
+
+// ---- 时序复核：状态规范化与表单渲染 ----
+function ensureSchedState() {
+  state.horizon = Math.min(4, Math.max(2, Number(state.horizon) || 2));
+  const h = state.horizon;
+  const fit = (arr) => {
+    const a = Array.isArray(arr) ? arr.slice(0, h) : [];
+    while (a.length < h) a.push(0);
+    return a;
+  };
+  state.release = fit(state.release);
+  state.zones.forEach((z) => { z.demands = fit(z.demands); });
+  state.nodes.forEach((n) => {
+    if (!Number.isInteger(n.capacity) || n.capacity < 0) n.capacity = 0;
+  });
+  state.pipes.forEach((p) => {
+    if (!Number.isInteger(p.transit) || p.transit < 0 || p.transit > h) {
+      p.transit = 0;
+    }
+  });
+}
+
+function renderScheduleForm() {
+  ensureSchedState();
+  $("horizon").value = String(state.horizon);
+  $("release-row").innerHTML = state.release.map((v, t) => `
+    <label>时隙 ${t} 放出
+      <input type="number" min="0" step="1" value="${v}" onchange="updateRelease(${t},this.value)">
+    </label>`).join("");
+
+  $("zone-demand-head").innerHTML = `<tr><th>分区</th>${
+    state.release.map((_, t) => `<th class="num">时隙 ${t} 需求</th>`).join("")
+  }</tr>`;
+  $("zone-demand-body").innerHTML = state.zones.map((z, zi) => `
+    <tr><td>${esc(z.id)}</td>${z.demands.map((v, t) => `
+      <td class="num"><input type="number" min="0" step="1" value="${v}" onchange="updateZoneDemand(${zi},${t},this.value)"></td>`).join("")}
+    </tr>`).join("");
+
+  $("node-cap-row").innerHTML = state.nodes.length
+    ? state.nodes.map((n, ni) => `
+      <label>${esc(n.id)} 暂存上限
+        <input type="number" min="0" step="1" value="${n.capacity}" onchange="updateNodeCap(${ni},this.value)">
+      </label>`).join("")
+    : `<span class="hint">无分流节点（在上方草稿添加后可设暂存上限）</span>`;
+
+  $("pipe-transit-body").innerHTML = state.pipes.map((p, i) => `
+    <tr>
+      <td><span class="order-tag">${i + 1}</span></td>
+      <td>${esc(p.id)}</td>
+      <td>${esc(p.from)} <span class="arrow">→</span> ${esc(p.to)}</td>
+      <td class="num"><input type="number" min="0" max="${state.horizon}" step="1" value="${p.transit}" onchange="updateTransit(${i},this.value)"></td>
+    </tr>`).join("");
 }
 
 function syncSource() {
@@ -268,14 +373,15 @@ window.movePipe = (i, dir) => {
 $("btn-add-zone").addEventListener("click", () => {
   syncSource();
   if (state.zones.length < 4) {
-    state.zones.push({ id: `Z${state.zones.length + 1}`, demand: 0 });
+    state.zones.push({ id: `Z${state.zones.length + 1}`, demand: 0,
+                       demands: Array(state.horizon).fill(0) });
     render();
   }
 });
 $("btn-add-node").addEventListener("click", () => {
   syncSource();
   if (state.nodes.length < 4) {
-    state.nodes.push({ id: `N${state.nodes.length + 1}` });
+    state.nodes.push({ id: `N${state.nodes.length + 1}`, capacity: 0 });
     render();
   }
 });
@@ -286,7 +392,7 @@ $("btn-add-pipe").addEventListener("click", () => {
     state.pipes.push({
       id: `p${n}`, from: state.source.id,
       to: state.zones[0] ? state.zones[0].id : "",
-      min: 0, preferred: 0, max: 5,
+      min: 0, preferred: 0, max: 5, transit: 0,
     });
     render();
   }
@@ -294,15 +400,22 @@ $("btn-add-pipe").addEventListener("click", () => {
 $("btn-sample").addEventListener("click", () => {
   document.getElementById("result").innerHTML = "";
   document.getElementById("form-error").innerHTML = "";
+  document.getElementById("sched-result").innerHTML = "";
+  document.getElementById("sched-error").innerHTML = "";
   state.source = { id: "S", total: 10 };
-  state.zones = [{ id: "A", demand: 6 }, { id: "B", demand: 4 }];
-  state.nodes = [{ id: "N" }];
-  state.pipes = [
-    { id: "p1", from: "S", to: "N", min: 0, preferred: 5, max: 10 },
-    { id: "p2", from: "N", to: "A", min: 0, preferred: 3, max: 10 },
-    { id: "p3", from: "N", to: "B", min: 0, preferred: 7, max: 10 },
-    { id: "p4", from: "S", to: "A", min: 0, preferred: 0, max: 0 },
+  state.zones = [
+    { id: "A", demand: 6, demands: [0, 2, 4] },
+    { id: "B", demand: 4, demands: [0, 2, 2] },
   ];
+  state.nodes = [{ id: "N", capacity: 2 }];
+  state.pipes = [
+    { id: "p1", from: "S", to: "N", min: 0, preferred: 5, max: 10, transit: 1 },
+    { id: "p2", from: "N", to: "A", min: 0, preferred: 3, max: 10, transit: 0 },
+    { id: "p3", from: "N", to: "B", min: 0, preferred: 7, max: 10, transit: 0 },
+    { id: "p4", from: "S", to: "A", min: 0, preferred: 0, max: 0, transit: 0 },
+  ];
+  state.horizon = 3;
+  state.release = [5, 5, 0];
   render();
 });
 
@@ -453,6 +566,221 @@ $("btn-run").addEventListener("click", async () => {
   } finally {
     btn.disabled = false;
     btn.textContent = "发起配平";
+  }
+});
+
+// ---- 时序复核：字段编辑、提交与结果渲染 ----
+window.updateRelease = (t, val) => {
+  syncSource();
+  state.release[t] = Number(val);
+};
+window.updateZoneDemand = (zi, t, val) => {
+  syncSource();
+  state.zones[zi].demands[t] = Number(val);
+};
+window.updateNodeCap = (ni, val) => {
+  syncSource();
+  state.nodes[ni].capacity = Number(val);
+};
+window.updateTransit = (i, val) => {
+  syncSource();
+  state.pipes[i].transit = Number(val);
+};
+$("horizon").addEventListener("change", () => {
+  syncSource();
+  state.horizon = Number($("horizon").value);
+  ensureSchedState();
+  render();
+});
+
+function buildSchedulePayload() {
+  syncSource();
+  ensureSchedState();
+  return {
+    source: { id: state.source.id },
+    horizon: state.horizon,
+    source_release: state.release.slice(),
+    zones: state.zones.map((z) => ({ id: z.id, demands: z.demands.slice() })),
+    nodes: state.nodes.map((n) => ({ id: n.id, capacity: n.capacity })),
+    pipes: state.pipes.map((p) => ({
+      id: p.id, from: p.from, to: p.to,
+      min: p.min, max: p.max, preferred: p.preferred, transit: p.transit,
+    })),
+  };
+}
+
+function slotTable(slot) {
+  const depRows = slot.departures.map((d) => `
+    <tr><td>${esc(d.pipe_id)}</td>
+      <td>${esc(d.from)} <span class="arrow">→</span> ${esc(d.to)}</td>
+      <td class="num flow-cell">${d.amount}</td>
+      <td class="num">时隙 ${d.arrival_slot}</td></tr>`).join("");
+  const arrRows = slot.arrivals.map((a) => `
+    <tr><td>${esc(a.pipe_id)}</td>
+      <td>${esc(a.from)} <span class="arrow">→</span> ${esc(a.to)}</td>
+      <td class="num flow-cell">${a.amount}</td>
+      <td class="num">时隙 ${a.departed_slot}</td></tr>`).join("");
+  const nodeRows = slot.nodes.length
+    ? slot.nodes.map((n) => `
+      <tr><td>${esc(n.id)}</td>
+        <td class="num">${n.stock_start}</td>
+        <td class="num">${n.arrived}</td>
+        <td class="num">${n.dispatched}</td>
+        <td class="num flow-cell">${n.stock_end}</td>
+        <td class="num">${n.capacity}</td></tr>`).join("")
+    : `<tr><td colspan="6" class="muted">无分流节点</td></tr>`;
+  const zoneRows = slot.zones.map((z) => `
+    <tr><td>${esc(z.id)}</td>
+      <td class="num">${z.arrived}</td>
+      <td class="num">${z.demand}</td>
+      ${diffCell(z.difference)}</tr>`).join("");
+  const src = slot.source;
+  return `
+    <div class="card" style="margin-bottom:12px">
+      <h2>时隙 ${slot.slot}　<span class="hint">水源放出 ${src.released} / 申报 ${src.declared}　·　期末在途 ${slot.in_transit_end}</span></h2>
+      <div class="row" style="align-items:flex-start">
+        <div style="flex:1; min-width:260px">
+          <h2>管路发出</h2>
+          <table><thead><tr><th>管路</th><th>方向</th><th class="num">发出量</th><th class="num">到达时隙</th></tr></thead>
+            <tbody>${depRows || '<tr><td colspan="4" class="muted">无</td></tr>'}</tbody></table>
+        </div>
+        <div style="flex:1; min-width:260px">
+          <h2>管路到达</h2>
+          <table><thead><tr><th>管路</th><th>方向</th><th class="num">到达量</th><th class="num">发出时隙</th></tr></thead>
+            <tbody>${arrRows || '<tr><td colspan="4" class="muted">无</td></tr>'}</tbody></table>
+        </div>
+      </div>
+      <div class="row" style="align-items:flex-start; margin-top:10px">
+        <div style="flex:1; min-width:280px">
+          <h2>节点库存</h2>
+          <table><thead><tr><th>节点</th><th class="num">期初库存</th><th class="num">当期到达</th><th class="num">当期发出</th><th class="num">期末库存</th><th class="num">暂存上限</th></tr></thead>
+            <tbody>${nodeRows}</tbody></table>
+        </div>
+        <div style="flex:1; min-width:240px">
+          <h2>分区到水</h2>
+          <table><thead><tr><th>分区</th><th class="num">到水</th><th class="num">需求</th><th class="num">差额</th></tr></thead>
+            <tbody>${zoneRows}</tbody></table>
+        </div>
+      </div>
+    </div>`;
+}
+
+function renderSchedFeasible(r) {
+  const seq = r.tie_sequence.map((x) => esc(x)).join(", ");
+  const slotHeads = r.ledger.map((s) => `<th class="num">时隙 ${s.slot}</th>`).join("");
+  const matrixRows = r.dispatch.map((d) => `
+    <tr>
+      <td><span class="order-tag">${d.order + 1}</span> ${esc(d.pipe_id)}</td>
+      <td>${esc(d.from)} <span class="arrow">→</span> ${esc(d.to)}</td>
+      ${d.slots.map((s) => s.usable
+        ? `<td class="num flow-cell">${s.flow}</td>`
+        : `<td class="num muted" title="期末后才能到达，禁止发出">—</td>`).join("")}
+      <td class="num">${d.transit}</td>
+      <td class="num muted">${d.preferred}</td>
+    </tr>`).join("");
+  const invRows = r.inventory.length
+    ? r.inventory.map((n) => `
+      <tr><td>${esc(n.node_id)}</td>
+        ${n.slots.map((s) => `<td class="num flow-cell">${s.stock}</td>`).join("")}
+        <td class="num">${n.capacity}</td></tr>`).join("")
+    : `<tr><td colspan="${r.horizon + 2}" class="muted">无分流节点</td></tr>`;
+
+  $("sched-result").innerHTML = `
+    <section class="card">
+      <div class="row" style="justify-content:space-between">
+        <h2 style="margin:0">时序复核结果　<span class="badge ok">可行方案</span></h2>
+        <div class="hint">各（时隙×管路）相对优选量绝对偏差和 = <b>${r.objective}</b></div>
+      </div>
+      <p class="hint" style="margin-top:8px">
+        决胜发出序列（时隙优先、同隙按管路录入顺序）：<span class="seq">[${seq}]</span>
+      </p>
+      <h2 style="margin-top:14px">逐管逐时隙发出量</h2>
+      <table>
+        <thead><tr><th>管路</th><th>方向</th>${slotHeads}<th class="num">行程</th><th class="num">优选量</th></tr></thead>
+        <tbody>${matrixRows}</tbody>
+      </table>
+      <h2 style="margin-top:14px">节点逐时隙期末库存</h2>
+      <table>
+        <thead><tr><th>节点</th>${slotHeads}<th class="num">暂存上限</th></tr></thead>
+        <tbody>${invRows}</tbody>
+      </table>
+      <h2 style="margin-top:14px">逐时隙发出 / 到达 / 库存台账</h2>
+      ${r.ledger.map(slotTable).join("")}
+    </section>`;
+}
+
+function renderSchedInfeasible(r) {
+  const info = r.infeasibility;
+  const reasons = info.reasons.map((t) => `<li>${esc(t)}</li>`).join("");
+  const first = info.first_failure_slot === null
+    ? "—"
+    : `时隙 ${info.first_failure_slot}`;
+  const defRows = info.deficits.map((d) => `
+    <tr><td>时隙 ${d.slot}</td><td>${esc(d.vertex)}</td><td>${esc(d.kind)}</td>
+      <td class="num">${d.shortfall}</td></tr>`).join("");
+  const surRows = info.surpluses.map((s) => `
+    <tr><td>时隙 ${s.slot}</td><td>${esc(s.vertex)}</td><td>${esc(s.kind)}</td>
+      <td class="num">${s.excess}</td></tr>`).join("");
+
+  $("sched-result").innerHTML = `
+    <section class="card">
+      <h2>时序复核结果　<span class="badge no">不可行</span></h2>
+      <div class="banner warn">
+        首个无法满足的时隙：<b>${first}</b>　·
+        水源放出合计 <b>${info.total_release}</b>，分区需求合计 <b>${info.total_demand}</b>；
+        需补入时空网络的守恒流量 <b>${Math.max(info.ss_required, info.tt_required)}</b> 单位，
+        实际只能成立 <b>${info.achieved_flow}</b> 单位（缺口 <b>${info.shortfall_flow}</b>）。
+      </div>
+      <h2>结论与原因</h2>
+      <ul class="reasons">${reasons}</ul>
+      <div class="row" style="align-items:flex-start; margin-top:10px">
+        <div style="flex:1">
+          <h2>进水不足点</h2>
+          <table><thead><tr><th>时隙</th><th>编号</th><th>类型</th><th class="num">缺口</th></tr></thead>
+            <tbody>${defRows || '<tr><td colspan="4" class="muted">无</td></tr>'}</tbody></table>
+        </div>
+        <div style="flex:1">
+          <h2>来水积压点</h2>
+          <table><thead><tr><th>时隙</th><th>编号</th><th>类型</th><th class="num">积压</th></tr></thead>
+            <tbody>${surRows || '<tr><td colspan="4" class="muted">无</td></tr>'}</tbody></table>
+        </div>
+      </div>
+      <p class="hint" style="margin-top:10px">
+        提示：时序问题常被静态配平掩盖——请检查行程时隙是否赶不上首个缺水的时隙、
+        分流节点暂存上限是否足以让水量跨隙等待、以及各时隙放出与需求合计是否相等。
+      </p>
+    </section>`;
+}
+
+$("btn-sched").addEventListener("click", async () => {
+  const errBox = $("sched-error");
+  errBox.innerHTML = "";
+  $("sched-result").innerHTML = "";
+  const btn = $("btn-sched");
+  btn.disabled = true;
+  btn.textContent = "复核中…";
+  try {
+    const resp = await fetch("/api/schedule", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(buildSchedulePayload()),
+    });
+    const data = await resp.json();
+    if (resp.status === 400) {
+      errBox.innerHTML = `<div class="banner error">时隙草稿未通过校验：${esc(data.error)}</div>`;
+      return;
+    }
+    if (!resp.ok) {
+      errBox.innerHTML = `<div class="banner error">服务异常（HTTP ${resp.status}），请稍后重试。</div>`;
+      return;
+    }
+    if (data.feasible) renderSchedFeasible(data);
+    else renderSchedInfeasible(data);
+  } catch (e) {
+    errBox.innerHTML = `<div class="banner error">无法连接时序复核服务：${esc(e.message)}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "发起时序复核";
   }
 });
 
